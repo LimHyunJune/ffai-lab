@@ -1,0 +1,12 @@
+libdir=./lib
+includedir./include
+
+Name: libavcodec
+Description: FFmpeg codec library
+Version: 62.16.100
+Requires: 
+Requires.private: libswresample >= 6.2.100, libavutil >= 60.13.100
+Conflicts:
+Libs: -L${libdir}  -lavcodec 
+Libs.private: -lvpx -lm -lvpx -lm -lvpx -lm -lvpx -lm -pthread -lm -latomic -ldav1d -laom -lmp3lame -lm -lopus -lSvtAv1Enc -lvorbis -lvorbisenc -lx264 -lx265 -lz -lva
+Cflags: -I${includedir}

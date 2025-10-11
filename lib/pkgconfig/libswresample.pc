@@ -1,0 +1,12 @@
+libdir=./lib
+includedir./include
+
+Name: libswresample
+Description: FFmpeg audio resampling library
+Version: 6.2.100
+Requires: 
+Requires.private: libavutil >= 60.13.100
+Conflicts:
+Libs: -L${libdir}  -lswresample 
+Libs.private: -lm -latomic
+Cflags: -I${includedir}

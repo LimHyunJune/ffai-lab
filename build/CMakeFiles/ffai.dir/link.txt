@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wl,--no-as-needed CMakeFiles/ffai.dir/src/main.cpp.o -o ffai   -L/home/ubuntu/ffai-lab/./lib  -Wl,-rpath,/home/ubuntu/ffai-lab/./lib -lavcodec -lavformat -lavfilter -lavutil -lswresample -lSvtAv1Enc -lswscale -lvmaf 
