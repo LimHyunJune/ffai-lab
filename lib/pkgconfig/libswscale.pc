@@ -1,5 +1,5 @@
 libdir=./lib
-includedir./include
+includedir=./include
 
 Name: libswscale
 Description: FFmpeg image rescaling library

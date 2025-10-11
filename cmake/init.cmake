@@ -5,8 +5,33 @@ find_package(PkgConfig REQUIRED)
 set(ENV{PKG_CONFIG_PATH} "${CMAKE_SOURCE_DIR}/lib/pkgconfig")
 
 list(APPEND TARGET_FILES
-  "${CMAKE_SOURCE_DIR}/src/main.h"
   "${CMAKE_SOURCE_DIR}/src/main.cpp"
+  "${CMAKE_SOURCE_DIR}/src/main.h"
+  "${CMAKE_SOURCE_DIR}/src/input/src/InputHandler.cpp"
+  "${CMAKE_SOURCE_DIR}/src/input/inc/InputHandler.h"
+  "${CMAKE_SOURCE_DIR}/src/decoder/src/DecoderHandler.cpp"
+  "${CMAKE_SOURCE_DIR}/src/decoder/inc/DecoderHandler.h"
+  "${CMAKE_SOURCE_DIR}/src/filter/src/FilterHandler.cpp"
+  "${CMAKE_SOURCE_DIR}/src/filter/inc/FilterHandler.h"
+  "${CMAKE_SOURCE_DIR}/src/encoder/src/EncoderHandler.cpp"
+  "${CMAKE_SOURCE_DIR}/src/encoder/inc/EncoderHandler.h"
+  "${CMAKE_SOURCE_DIR}/src/output/src/OutputHandler.cpp"
+  "${CMAKE_SOURCE_DIR}/src/output/inc/OutputHandler.h"
+  "${CMAKE_SOURCE_DIR}/src/core/src/Controller.cpp"
+  "${CMAKE_SOURCE_DIR}/src/core/inc/Controller.h"
+  "${CMAKE_SOURCE_DIR}/src/util/src/Logger.cpp"
+  "${CMAKE_SOURCE_DIR}/src/util/inc/Logger.h"
+)
+
+list(APPEND HEADER_FILES
+  "${CMAKE_SOURCE_DIR}/src"
+  "${CMAKE_SOURCE_DIR}/src/input/inc"
+  "${CMAKE_SOURCE_DIR}/src/decoder/inc"
+  "${CMAKE_SOURCE_DIR}/src/filter/inc"
+  "${CMAKE_SOURCE_DIR}/src/encoder/inc"
+  "${CMAKE_SOURCE_DIR}/src/output/inc"
+  "${CMAKE_SOURCE_DIR}/src/util/inc"
+  "${CMAKE_SOURCE_DIR}/src/core/inc"
 )
 
 set(PKG_CONFIG_USE_STATIC OFF)
@@ -20,6 +45,11 @@ pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
 pkg_check_modules(VMAF REQUIRED libvmaf)
 
+message(STATUS "AVFORMAT_INCLUDE_DIRS=${AVFORMAT_INCLUDE_DIRS}")
+
+
+find_package(Boost COMPONENTS log REQUIRED) # .pc 파일 대신 cmake가 외부 라이브러리/패키지를 찾아서 사용 준비 시킴
+# Boost 패키지에서 log 컴포넌트를 반드시 찾도록 명령
 
 # include 경로 설정
 include_directories(
@@ -31,6 +61,8 @@ include_directories(
   ${SVTAV1ENC_INCLUDE_DIRS}
   ${SWSCALE_INCLUDE_DIRS}
   ${VMAF_INCLUDE_DIRS}
+  ${HEADER_FILES}
+  ${Boost_INCLUDE_DIRS}
 )
 
 link_directories(
@@ -42,6 +74,7 @@ link_directories(
   ${SVTAV1ENC_LIBRARY_DIRS}
   ${SWSCALE_LIBRARY_DIRS}
   ${VMAF_LIBRARY_DIRS}
+  ${Boost_LIBRARY_DIRS}
 )
 
 add_executable(ffai ${TARGET_FILES})
@@ -61,6 +94,7 @@ target_link_libraries(ffai PRIVATE
   ${SVTAV1ENC_LIBRARIES}
   ${SWSCALE_LIBRARIES}
   ${VMAF_LIBRARIES}
+  ${Boost_LIBRARIES}
 )
 
 if (CMAKE_VERSION VERSION_GREATER 3.12)

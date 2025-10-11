@@ -1,5 +1,5 @@
 libdir=./lib
-includedir./include
+includedir=./include
 
 Name: libavcodec
 Description: FFmpeg codec library

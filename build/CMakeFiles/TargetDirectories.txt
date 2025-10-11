@@ -1,3 +1,0 @@
-/home/ubuntu/ffai-lab/build/CMakeFiles/ffai.dir
-/home/ubuntu/ffai-lab/build/CMakeFiles/edit_cache.dir
-/home/ubuntu/ffai-lab/build/CMakeFiles/rebuild_cache.dir
