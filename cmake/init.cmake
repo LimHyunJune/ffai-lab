@@ -6,21 +6,15 @@ set(ENV{PKG_CONFIG_PATH} "${CMAKE_SOURCE_DIR}/lib/pkgconfig")
 
 list(APPEND TARGET_FILES
   "${CMAKE_SOURCE_DIR}/src/main.cpp"
-  "${CMAKE_SOURCE_DIR}/src/main.h"
   "${CMAKE_SOURCE_DIR}/src/input/src/InputHandler.cpp"
-  "${CMAKE_SOURCE_DIR}/src/input/inc/InputHandler.h"
   "${CMAKE_SOURCE_DIR}/src/decoder/src/DecoderHandler.cpp"
-  "${CMAKE_SOURCE_DIR}/src/decoder/inc/DecoderHandler.h"
   "${CMAKE_SOURCE_DIR}/src/filter/src/FilterHandler.cpp"
-  "${CMAKE_SOURCE_DIR}/src/filter/inc/FilterHandler.h"
+  "${CMAKE_SOURCE_DIR}/src/filter/src/personseg_ort.cpp"
+  "${CMAKE_SOURCE_DIR}/src/filter/src/vf_personseg.c"
   "${CMAKE_SOURCE_DIR}/src/encoder/src/EncoderHandler.cpp"
-  "${CMAKE_SOURCE_DIR}/src/encoder/inc/EncoderHandler.h"
   "${CMAKE_SOURCE_DIR}/src/output/src/OutputHandler.cpp"
-  "${CMAKE_SOURCE_DIR}/src/output/inc/OutputHandler.h"
   "${CMAKE_SOURCE_DIR}/src/core/src/Controller.cpp"
-  "${CMAKE_SOURCE_DIR}/src/core/inc/Controller.h"
   "${CMAKE_SOURCE_DIR}/src/util/src/Logger.cpp"
-  "${CMAKE_SOURCE_DIR}/src/util/inc/Logger.h"
 )
 
 list(APPEND HEADER_FILES
@@ -44,9 +38,7 @@ pkg_check_modules(AVUTIL REQUIRED libavutil)
 pkg_check_modules(SWRESAMPLE REQUIRED libswresample)
 pkg_check_modules(SWSCALE REQUIRED libswscale)
 pkg_check_modules(VMAF REQUIRED libvmaf)
-
-message(STATUS "AVFORMAT_INCLUDE_DIRS=${AVFORMAT_INCLUDE_DIRS}")
-
+pkg_check_modules(ONNXRUNTIME REQUIRED libonnxruntime)
 
 find_package(Boost COMPONENTS log REQUIRED) # .pc 파일 대신 cmake가 외부 라이브러리/패키지를 찾아서 사용 준비 시킴
 # Boost 패키지에서 log 컴포넌트를 반드시 찾도록 명령
@@ -60,6 +52,7 @@ include_directories(
   ${SWRESAMPLE_INCLUDE_DIRS}
   ${SVTAV1ENC_INCLUDE_DIRS}
   ${SWSCALE_INCLUDE_DIRS}
+  ${ONNXRUNTIME_INCLUDE_DIRS}
   ${VMAF_INCLUDE_DIRS}
   ${HEADER_FILES}
   ${Boost_INCLUDE_DIRS}
@@ -73,6 +66,7 @@ link_directories(
   ${SWRESAMPLE_LIBRARY_DIRS}
   ${SVTAV1ENC_LIBRARY_DIRS}
   ${SWSCALE_LIBRARY_DIRS}
+  ${ONNXRUNTIME_LIBRARY_DIRS}
   ${VMAF_LIBRARY_DIRS}
   ${Boost_LIBRARY_DIRS}
 )
@@ -93,6 +87,7 @@ target_link_libraries(ffai PRIVATE
   ${SWRESAMPLE_LIBRARIES}
   ${SVTAV1ENC_LIBRARIES}
   ${SWSCALE_LIBRARIES}
+  ${ONNXRUNTIME_LIBRARIES}
   ${VMAF_LIBRARIES}
   ${Boost_LIBRARIES}
 )
