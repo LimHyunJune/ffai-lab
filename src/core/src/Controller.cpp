@@ -15,44 +15,24 @@ Controller::~Controller()
 
 void Controller::start(string req, string target)
 {
-    controller_config.main_input_path = "srt://0.0.0.0:8080?mode=listener&latency=600&rcvbuf=32768000";
+    controller_config.main_input_path = "~/ffai-lab/akina.mp4";
+    // controller_config.main_input_path = "srt://0.0.0.0:8080?mode=listener&latency=600&rcvbuf=32768000";
     controller_config.backup_input_path = "srt://0.0.0.0:8081?mode=listener&latency=600&rcvbuf=32768000";
-    // controller_config.input_path = "/playout-multiview-generator/assets/jungkook.mp4";
 
-    if(req[0] == '1')
-    {
-        if(req[1] == '1')
-            controller_config.filter_config.filter_type = FilterType::MULTIVIEW_1;
-        else if(req[1] == '2')
-            controller_config.filter_config.filter_type = FilterType::MULTIVIEW_2;
-        else if(req[1] == '3')
-            controller_config.filter_config.filter_type = FilterType::MULTIVIEW_3;
-        else if(req[1] == '4')
-            controller_config.filter_config.filter_type = FilterType::MULTIVIEW_4;
-    }
-    else if(req[0] == '2')
-    {
-        if(req[1] == '1')
-            controller_config.filter_config.filter_type = FilterType::SEPARATE_1;
-        else if(req[1] == '2')
-            controller_config.filter_config.filter_type = FilterType::SEPARATE_2;
-        else if(req[1] == '3')
-            controller_config.filter_config.filter_type = FilterType::SEPARATE_3;
-        else if(req[1] == '4')
-            controller_config.filter_config.filter_type = FilterType::SEPARATE_4;
-    }
-    controller_config.filter_config.use_gpu = true;
+    controller_config.filter_config.filter_type = FilterType::NONE;
+    controller_config.filter_config.use_gpu = false;
 
     controller_config.encoder_config.width = 3840;
     controller_config.encoder_config.height = 2160;
     controller_config.encoder_config.bit_rate = 20000000;
     controller_config.encoder_config.frame_rate = AVRational{60,1};
     controller_config.encoder_config.time_base = AVRational{1,90000};
-    controller_config.encoder_config.use_gpu = true;
+    controller_config.encoder_config.use_gpu = false;
     controller_config.encoder_config.preset = "p4";
     controller_config.encoder_config.encoder_type = EncoderType::H265;
 
-    controller_config.output_config.output_path = "srt://" + target + "?mode=caller";
+    controller_config.output_config.output_path = "~/ffai-lab/akina_filtered.mp4";
+    // controller_config.output_config.output_path = "srt://" + target + "?mode=caller";
     // controller_config.output_config.output_path = "srt://abr:9999?mode=caller";
     // controller_config.output_config.output_path = "./output/out.mp4";
     controller_config.output_config.output_type = OutputType::SRT;
@@ -99,60 +79,42 @@ bool Controller::init_input()
     if(!main_input_ctx)
         return false;
     
-    main_video_streams = input_handler->get_main_video_stream();
-
-    // backup_input_ctx = input_handler->get_backup_input_context();
-    // backup_video_streams = input_handler->get_backup_video_stream();
-
-    
-
+    main_video_stream = input_handler->get_main_video_stream();
     main_input_ctx->interrupt_callback.callback = &Controller::interrupt_cb;
     main_input_ctx->interrupt_callback.opaque = this;
 
-    // if(backup_input_ctx)
-    // {
-    //     backup_input_ctx->interrupt_callback.callback = &Controller::interrupt_cb;
-    //     backup_input_ctx->interrupt_callback.opaque = this;
-    // }
-
     active_input_ctx = main_input_ctx;
-    active_video_streams = main_video_streams;
+    active_video_stream = main_video_stream;
 
-    // last_io_ts_us.store(av_gettime_relative());
-
-    // main_alive.store(true);
-    // backup_alive.store(backup_input_ctx != nullptr);
     return true;
 }
 
 bool Controller::init_decoder()
 {
     decoder_handler = new DecoderHandler();
-    dec_ctxs = decoder_handler->get_decoder_codec_context(active_video_streams, hw_device_ctx);
-    for(auto dec : dec_ctxs)
-    {
-        av_buffer_unref(&dec.second->hw_frames_ctx);
-        dec.second->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
-        dec.second->thread_count = 1;
-    }
+    dec_ctx = decoder_handler->get_decoder_codec_context(active_video_stream, nullptr);
 
-    if(!dec_ctxs.size())
+    // av_buffer_unref(&dec_ctx->hw_frames_ctx);
+    // dec_ctx->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+    dec_ctx->thread_count = 1;
+
+    if(!dec_ctx)
         return false;
     return true;
 }
 
 bool Controller::init_filter()
 {
-    controller_config.filter_config.dec_ctxs = dec_ctxs;
-    controller_config.filter_config.video_streams = active_video_streams;
-    controller_config.filter_config.hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+    controller_config.filter_config.dec_ctx = dec_ctx;
+    controller_config.filter_config.video_stream = active_video_stream;
+    // controller_config.filter_config.hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
     filter_handler = new FilterHandler(controller_config.filter_config);
     
-    pair<map<int,AVFilterContext*>, AVFilterContext*> buffer = filter_handler->get_filter_context();
-    buffersrc_ctxs = buffer.first;
+    pair<AVFilterContext*, AVFilterContext*> buffer = filter_handler->get_filter_context();
+    buffersrc_ctx = buffer.first;
     buffersink_ctx = buffer.second;
 
-    if(!buffersrc_ctxs.size() || !buffersink_ctx)
+    if(!buffersrc_ctx || !buffersink_ctx)
         return false;
     return true;
 }
@@ -227,12 +189,12 @@ void Controller::run_decoder_thread() {
         while (flag && input_queue.pop(pkt)) {
             BOOST_LOG(debug) << "decode loop start";
             int idx = pkt->stream_index;
-            if(!buffersrc_ctxs[idx])
+            if(!buffersrc_ctx)
             {
                 av_packet_free(&pkt);
                 continue;
             }
-            int ret = avcodec_send_packet(dec_ctxs[idx], pkt);
+            int ret = avcodec_send_packet(dec_ctx, pkt);
             if (ret < 0) {
                 Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "decoder send error", ret);
                 av_packet_free(&pkt);
@@ -241,13 +203,12 @@ void Controller::run_decoder_thread() {
 
             while (true) {
                 AVFrame* frame = av_frame_alloc();
-                int ret = avcodec_receive_frame(dec_ctxs[idx], frame);
+                int ret = avcodec_receive_frame(dec_ctx, frame);
                 if (ret >= 0) {
                     // frame->pts = pkt->pts;
                     // frame->pkt_dts = pkt->dts;
                     // frame->duration = pkt->duration;
                     // frame->time_base = pkt->time_base;
-                    frame->opaque = (void*)(intptr_t)idx;
                     decoder_queue.push(frame);
                 }
                 else
@@ -280,7 +241,6 @@ void Controller::run_filter_thread() {
         AVFrame* frame = nullptr;
         while (flag && decoder_queue.pop(frame)) {
             BOOST_LOG(debug) << "filter loop start";
-            int idx = (int)(intptr_t)frame->opaque;
             // int64_t duration = frame->duration;
 
             // if (is_hw_frame_fmt(frame->format)) {
@@ -298,7 +258,7 @@ void Controller::run_filter_thread() {
             //     frame = sw;
             // }
 
-            int ret = av_buffersrc_add_frame_flags(buffersrc_ctxs[idx], frame, 0);
+            int ret = av_buffersrc_add_frame_flags(buffersrc_ctx, frame, 0);
             av_frame_free(&frame);
 
             while (true) {

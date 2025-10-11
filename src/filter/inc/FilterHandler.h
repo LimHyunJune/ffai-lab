@@ -15,13 +15,13 @@ using namespace std;
 
 enum class FilterType
 {
-    MULTIVIEW_1, MULTIVIEW_2, MULTIVIEW_3, MULTIVIEW_4, SEPARATE_1, SEPARATE_2, SEPARATE_3, SEPARATE_4, NONE
+    NONE
 };
 
 struct FilterConfig
 {
-    map<int,AVCodecContext*> dec_ctxs;
-    vector<AVStream*> video_streams;
+    AVCodecContext* dec_ctx;
+    AVStream* video_stream;
     bool use_gpu;
     FilterType filter_type;
     AVBufferRef* hw_frames_ctx;
@@ -31,7 +31,7 @@ class FilterHandler
 {
     private:
         AVFilterGraph* filter_graph = nullptr;
-        map<int,AVFilterContext*> buffersrc_ctxs;
+        AVFilterContext* buffersrc_ctx = nullptr;
         AVFilterContext* buffersink_ctx = nullptr;
 
         AVFilterInOut* inputs = nullptr;
@@ -44,17 +44,8 @@ class FilterHandler
         string hwupload = "";
         string hwdownload = "";
 
-        void filter_multiview_1();
-        void filter_multiview_2();
-        void filter_multiview_3();
-        void filter_multiview_4();
-        void filter_separate_1();
-        void filter_separate_2();
-        void filter_separate_3();
-        void filter_separate_4();
-
-        void make_filter_graph_parser(int idx);
-        void create_filter_graph(int idx);
+        void make_filter_graph_parser();
+        void create_filter_graph();
         void generate_filter();
 
         FilterConfig filter_config;
@@ -62,5 +53,5 @@ class FilterHandler
         FilterHandler() = delete;
         FilterHandler(FilterConfig filter_config);
         ~FilterHandler();
-        pair<map<int,AVFilterContext*>,AVFilterContext*> get_filter_context();
+        pair<AVFilterContext*,AVFilterContext*> get_filter_context();
 };

@@ -35,26 +35,28 @@ void InputHandler::open_backup_input()
     avformat_find_stream_info(backup_input_ctx, nullptr);
 }
 
-vector<AVStream*> InputHandler::get_main_video_stream()
+AVStream* InputHandler::get_main_video_stream()
 {
-    vector<AVStream*> video_streams;
+    AVStream* video_stream;
     for (unsigned int i = 0; i < main_input_ctx->nb_streams; i++) {
         if (main_input_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            video_streams.push_back(main_input_ctx->streams[i]);
+            video_stream = main_input_ctx->streams[i];
+            break;
         }
     }
-    return video_streams;
+    return video_stream;
 }
 
-vector<AVStream*> InputHandler::get_backup_video_stream()
+AVStream* InputHandler::get_backup_video_stream()
 {
-    vector<AVStream*> video_streams;
+    AVStream* video_stream;
     for (unsigned int i = 0; i < backup_input_ctx->nb_streams; i++) {
         if (backup_input_ctx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            video_streams.push_back(backup_input_ctx->streams[i]);
+            video_stream= backup_input_ctx->streams[i];
+            break;
         }
     }
-    return video_streams;
+    return video_stream;
 }
 
 AVFormatContext* InputHandler::get_main_input_context()

@@ -58,13 +58,13 @@ class Controller
         OutputHandler* output_handler = nullptr;
 
         AVFormatContext* main_input_ctx = nullptr;
-        vector<AVStream*> main_video_streams;
+        AVStream* main_video_stream;
 
         AVFormatContext* backup_input_ctx = nullptr;
-        vector<AVStream*> backup_video_streams;
+        AVStream* backup_video_stream;
 
         AVFormatContext* active_input_ctx = nullptr;
-        vector<AVStream*> active_video_streams;
+        AVStream* active_video_stream;
 
         atomic<bool> flag;
         
@@ -83,9 +83,9 @@ class Controller
         mutex switch_mtx;
         thread reconnect_thread;
 
-        map<int,AVCodecContext*> dec_ctxs;
+        AVCodecContext* dec_ctx;
 
-        map<int,AVFilterContext*> buffersrc_ctxs;
+        AVFilterContext* buffersrc_ctx = nullptr;
         AVFilterContext* buffersink_ctx = nullptr;
 
         AVCodecContext* enc_ctx = nullptr;
