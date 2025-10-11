@@ -13,31 +13,19 @@ const AVCodec* DecoderHandler::get_decoder_codec(AVCodecID codec_id, bool use_gp
 	{
 		case AVCodecID::AV_CODEC_ID_H264:
 			if (use_gpu)
-			{
 				return avcodec_find_decoder_by_name("h264_cuvid");
-			}
 			else
-			{
 				return avcodec_find_decoder_by_name("h264");
-			}
 		case AVCodecID::AV_CODEC_ID_HEVC:
 			if (use_gpu)
-			{
 				return avcodec_find_decoder_by_name("hevc_cuvid");
-			}
 			else
-			{
 				return avcodec_find_decoder_by_name("hevc");
-			}
 		case AVCodecID::AV_CODEC_ID_AV1:
 			if (use_gpu)
-			{
 				return avcodec_find_decoder_by_name("av1_cuvid");
-			}
 			else
-			{
 				return avcodec_find_decoder_by_name("av1");
-			}
 		default:
 			break;
 	}
