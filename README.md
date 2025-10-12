@@ -10,6 +10,10 @@ wget -O onnxruntime-linux-x64-$VER.tgz \
 tar -xzf onnxruntime-linux-x64-$VER.tgz
 ```
 
+Human Segmentation PPHumanSeg (OpenCV DNN) (png)
+<img width="990" height="396" alt="image" src="https://github.com/user-attachments/assets/7dc30eae-af86-4ffd-82e8-c7fcc361ab35" />
+
+
 - Boost log
 ```
 sudo apt install -y libboost-dev libboost-log-dev
