@@ -16,7 +16,10 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/time.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/version.h>
+#include <libavutil/frame.h>
 }
+
 
 #include <thread>
 #include <atomic>
@@ -31,6 +34,10 @@ extern "C" {
 
 #include "TSQueue.h"
 #include "Logger.h"
+
+#include "PersonSegProcessor.h"
+
+
 
 #include <string>
 #include <map>
@@ -106,6 +113,10 @@ class Controller
         std::thread encoder_thread;
         std::thread output_thread;
 
+        // Controller 클래스 내부 멤버 추가
+        std::unique_ptr<PersonSegProcessor> pseg_;
+        bool use_personseg_ = false;
+
         bool initialize();
         bool init_hw_device();
         bool init_input();
@@ -134,6 +145,6 @@ class Controller
             static Controller instance;
             return instance;
         }
-        void start(string req, string target);
+        void start();
 
 };

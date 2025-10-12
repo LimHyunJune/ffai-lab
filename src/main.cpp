@@ -1,8 +1,9 @@
 #include <iostream>
+#include "main.h"
 
 using namespace std;
 
 int main()
 {
-    cout << "test\n";
+    Controller::get_instance().start();
 }

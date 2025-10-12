@@ -10,7 +10,7 @@ list(APPEND TARGET_FILES
   "${CMAKE_SOURCE_DIR}/src/decoder/src/DecoderHandler.cpp"
   "${CMAKE_SOURCE_DIR}/src/filter/src/FilterHandler.cpp"
   "${CMAKE_SOURCE_DIR}/src/filter/src/personseg_ort.cpp"
-  "${CMAKE_SOURCE_DIR}/src/filter/src/vf_personseg.c"
+  "${CMAKE_SOURCE_DIR}/src/filter/src/PersonSegProcessor.cpp"
   "${CMAKE_SOURCE_DIR}/src/encoder/src/EncoderHandler.cpp"
   "${CMAKE_SOURCE_DIR}/src/output/src/OutputHandler.cpp"
   "${CMAKE_SOURCE_DIR}/src/core/src/Controller.cpp"
