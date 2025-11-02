@@ -6,6 +6,8 @@ extern "C" {
 }
     
 #include <string>
+#include <vector>
+#include <map>
 using namespace std;
 
 enum class OutputType
@@ -13,18 +15,23 @@ enum class OutputType
     FILE, SRT
 };
 
-struct OutputConfig
+struct OutputParam
 {
     AVCodecContext* enc_ctx;
     string output_path;
+};
+
+struct OutputConfig
+{
+    vector<OutputParam> params;
     OutputType output_type;
 };
 
 class OutputHandler
 {
     private:
-        AVFormatContext* output_fmt_ctx;
-        AVStream* output_stream;
+        map<int,AVFormatContext*> output_fmt_ctxs;
+        map<int,AVStream*> output_streams;
 
         OutputConfig output_config;
     public:
@@ -32,6 +39,6 @@ class OutputHandler
         OutputHandler(OutputConfig output_config);
         ~OutputHandler();
 
-        AVStream* get_output_stream();
-	    AVFormatContext* get_output_format_context();
+        map<int,AVStream*> get_output_stream();
+	    map<int,AVFormatContext*> get_output_format_context();
 };

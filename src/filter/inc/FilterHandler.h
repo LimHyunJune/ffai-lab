@@ -1,35 +1,61 @@
 #pragma once
-
-// FFmpeg 필터그래프 미사용 -> libavfilter 헤더 불필요
-struct AVCodecContext;
-struct AVStream;
-struct AVBufferRef;
-struct AVFilterContext;
+extern "C"{
+    #include <libavformat/avformat.h>
+	#include <libavcodec/avcodec.h>
+	#include <libavfilter/avfilter.h>
+	#include <libavfilter/buffersink.h>
+	#include <libavfilter/buffersrc.h>
+    #include <libavutil/opt.h>
+}
 
 #include <string>
-#include <utility>
+#include <map>
+#include <vector>
+using namespace std;
 
-enum class FilterType {
-    NONE
+enum class FilterType
+{
+    MULTIVIEW, NONE
 };
 
-struct FilterConfig {
-    AVCodecContext* dec_ctx      = nullptr;
-    AVStream*       video_stream = nullptr;
-    bool            use_gpu      = false;
-    FilterType      filter_type  = FilterType::NONE;
-    AVBufferRef*    hw_frames_ctx = nullptr;
-    std::string     model_path =
-        "/home/ubuntu/ffai-lab/model/human_segmentation_pphumanseg_2023mar_int8.onnx";
+struct FilterConfig
+{
+    int height;
+    int width;
+    AVRational frame_rate;
+    AVRational time_base;
+    bool use_gpu;
+    FilterType filter_type;
+    AVBufferRef* hw_frames_ctx;
 };
 
-class FilterHandler {
-public:
-    explicit FilterHandler(FilterConfig cfg);   // 선언만
-    ~FilterHandler();                           // 선언만
+class FilterHandler
+{
+    private:
+        AVFilterGraph* filter_graph = nullptr;
+        map<int,AVFilterContext*> buffersrc_ctxs;
+        AVFilterContext* buffersink_ctx = nullptr;
 
-    std::pair<AVFilterContext*, AVFilterContext*> get_filter_context(); // 선언만
+        AVFilterInOut* inputs = nullptr;
+        AVFilterInOut* outputs = nullptr;
 
-private:
-    FilterConfig filter_config;
+        string filter_descr = "";
+        string format = "";
+        string scale_type = "";
+        string overlay_type = "";
+        string hwupload = "";
+        string hwdownload = "";
+
+        void filter_multiview();
+
+        void make_filter_graph_parser(int idx);
+        void create_filter_graph(int idx);
+        void generate_filter();
+
+        FilterConfig filter_config;
+    public:
+        FilterHandler() = delete;
+        FilterHandler(FilterConfig filter_config);
+        ~FilterHandler();
+        pair<map<int,AVFilterContext*>,AVFilterContext*> get_filter_context();
 };

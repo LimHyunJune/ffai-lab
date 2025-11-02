@@ -18,7 +18,9 @@ extern "C"
     #include <libavutil/imgutils.h>
 }
 
+#include <vector>
 #include <string>
+#include <map>
 using namespace std;
 
 enum class EncoderType
@@ -26,11 +28,17 @@ enum class EncoderType
     H264, H265, AV1
 };
 
+struct EncoderParam
+{
+    int width;
+    int height;
+    int bit_rate;
+};
+
 struct EncoderConfig
 {
-    int height;
-    int width;
-    int bit_rate;
+    bool abr;
+    vector<EncoderParam> params;
     AVRational frame_rate;
     AVRational time_base;
     string preset;
@@ -41,15 +49,44 @@ struct EncoderConfig
 class EncoderHandler
 {
     private:
-        AVCodecContext *enc_ctx = nullptr;
+        map<int, AVCodecContext*> enc_ctxs;
         EncoderConfig encoder_config;
 
         const AVCodec* get_encoder_codec();
 
-        AVBufferRef* get_hw_frame_ref(AVBufferRef* hw_device_ctx);
+        AVBufferRef* get_hw_frame_ref(AVBufferRef* hw_device_ctx, int idx);
+
+
+        struct GpuScaler {
+            AVFilterGraph*  graph = nullptr;
+            AVFilterContext *src = nullptr, *scale = nullptr, *sink = nullptr;
+            int in_w=0, in_h=0, out_w=0, out_h=0;
+            bool ready=false;
+    
+            int init(AVBufferRef* hw_frames_ctx, int iw, int ih, int ow, int oh);
+            int process(AVFrame* in, AVFrame** out);
+            void close();
+        };
+
+        struct SwScaler {
+            SwsContext* sws = nullptr;
+            int in_w=0, in_h=0, out_w=0, out_h=0;
+            AVPixelFormat in_fmt = AV_PIX_FMT_NONE, out_fmt = AV_PIX_FMT_NONE;
+    
+            int ensure_ctx(int iw, int ih, AVPixelFormat ifmt, int ow, int oh, AVPixelFormat ofmt);
+            int process(AVFrame* in, int ow, int oh, AVPixelFormat ofmt, AVFrame** out);
+            void close();
+        };
+
+        vector<GpuScaler> gpu_scalers;
+        vector<SwScaler>  sw_scalers;
+
+
     public:
         EncoderHandler() = delete;
         EncoderHandler(EncoderConfig encoder_config);
         ~EncoderHandler();
-        AVCodecContext* get_encoder_codec_context(AVBufferRef* hw_device_ctx = nullptr);
+        map<int,AVCodecContext*> get_encoder_codec_context(AVBufferRef* hw_device_ctx = nullptr);
+
+        int scale_frame(int idx, AVFrame* in, AVFrame** out);
 };

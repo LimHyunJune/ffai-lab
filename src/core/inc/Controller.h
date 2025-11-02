@@ -16,10 +16,7 @@ extern "C" {
 #include <libavutil/frame.h>
 #include <libavutil/time.h>
 #include <libavutil/imgutils.h>
-#include <libavutil/version.h>
-#include <libavutil/frame.h>
 }
-
 
 #include <thread>
 #include <atomic>
@@ -31,13 +28,10 @@ extern "C" {
 #include "FilterHandler.h"
 #include "EncoderHandler.h"
 #include "OutputHandler.h"
+#include "VmafHandler.h"
 
 #include "TSQueue.h"
 #include "Logger.h"
-
-#include "PersonSegProcessor.h"
-
-
 
 #include <string>
 #include <map>
@@ -63,15 +57,16 @@ class Controller
         FilterHandler* filter_handler = nullptr;
         EncoderHandler* encoder_handler = nullptr;
         OutputHandler* output_handler = nullptr;
+        map<int,VmafHandler*> vmaf_handler;
 
         AVFormatContext* main_input_ctx = nullptr;
-        AVStream* main_video_stream;
+        vector<AVStream*> main_video_streams;
 
         AVFormatContext* backup_input_ctx = nullptr;
-        AVStream* backup_video_stream;
+        vector<AVStream*> backup_video_streams;
 
         AVFormatContext* active_input_ctx = nullptr;
-        AVStream* active_video_stream;
+        vector<AVStream*> active_video_streams;
 
         atomic<bool> flag;
         
@@ -90,46 +85,53 @@ class Controller
         mutex switch_mtx;
         thread reconnect_thread;
 
-        AVCodecContext* dec_ctx;
+        // void flush_all();
+        // bool reopen_main();
+        // bool reopen_backup();
+        // void start_reconnect_thread();
+        // void switch_to_backup_locked();
+        // void switch_to_main_locked();
 
-        AVFilterContext* buffersrc_ctx = nullptr;
+        //////////////////////////
+        map<int,AVCodecContext*> dec_ctxs;
+
+        map<int,AVFilterContext*> buffersrc_ctxs;
         AVFilterContext* buffersink_ctx = nullptr;
 
-        AVCodecContext* enc_ctx = nullptr;
-        AVFormatContext* out_fmt_ctx = nullptr;
-        AVStream* output_stream = nullptr;
+        map<int,AVCodecContext*> enc_ctxs;
+
+        map<int,AVFormatContext*> out_fmt_ctxs;
+        map<int,AVStream*> output_streams;
 
         AVBufferRef* hw_device_ctx = nullptr;
         AVBufferRef* hw_frames_ctx = nullptr;
 
-        TSQueue<AVPacket*> input_queue;
-        TSQueue<AVFrame*> decoder_queue;
-        TSQueue<AVFrame*> filter_queue;
-        TSQueue<AVPacket*> encoder_queue;
+        TSQueue<AVPacket*> input_queue{"INPUT"};
+        TSQueue<AVFrame*> decoder_queue{"DECODER"};
+        TSQueue<AVFrame*> filter_queue{"FILTER"};
+        TSQueue<AVPacket*> encoder_queue{"ENCODER"};
 
         std::thread input_thread;
         std::thread decoder_thread;
         std::thread filter_thread;
         std::thread encoder_thread;
         std::thread output_thread;
+        std::thread vmaf_thread;
 
-        // Controller 클래스 내부 멤버 추가
-        std::unique_ptr<PersonSegProcessor> pseg_;
-        bool use_personseg_ = false;
-
-        bool initialize();
         bool init_hw_device();
         bool init_input();
         bool init_decoder();
         bool init_filter();
         bool init_encoder();
         bool init_output();
+        bool init_vmaf();
 
         void run_input_thread();
         void run_decoder_thread();
         void run_filter_thread();
         void run_encoder_thread();
         void run_output_thread();
+        void run_vmaf_thread();
 
         Controller();
         ~Controller();

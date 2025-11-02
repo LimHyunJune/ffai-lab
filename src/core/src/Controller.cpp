@@ -1,457 +1,652 @@
 #include "Controller.h"
-#include "Logger.h"
-#include <chrono>
+#include "Timer.h"
+#include <cmath>
 
-extern "C" {
-  #include <libswscale/swscale.h>
-  #include <libavutil/avutil.h>
-  #include <libavutil/frame.h>
+Controller::Controller(){}
+
+Controller::~Controller()
+{
+    delete input_handler;
+    delete decoder_handler;
+    delete filter_handler;
+    delete encoder_handler;
+    delete output_handler;
+
+    av_buffer_unref(&hw_frames_ctx);
+    av_buffer_unref(&hw_device_ctx);
+
 }
 
-static inline bool valid_rate(AVRational r) { return r.num > 0 && r.den > 0; }
+void Controller::start()
+{
+    controller_config.main_input_path = "srt://0.0.0.0:8080?mode=listener&latency=2000&pkt_size=1316&rcvbuf=1073741824";
+    controller_config.backup_input_path = "srt://0.0.0.0:8081?mode=listener&latency=2000&pkt_size=1316&rcvbuf=1073741824";
+    // controller_config.input_path = "/playout-multiview-generator/assets/jungkook.mp4";
 
-Controller::Controller() {}
+    controller_config.filter_config.filter_type = FilterType::MULTIVIEW;
+    controller_config.filter_config.use_gpu = true;
+    controller_config.filter_config.frame_rate = AVRational{60,1};
+    controller_config.filter_config.time_base = AVRational{1,90000};
+    controller_config.filter_config.width = 3840;
+    controller_config.filter_config.height = 2160;
 
-Controller::~Controller() {
-  // 파일 close/트레일러는 start() 종료 전에 보장
-  av_buffer_unref(&hw_device_ctx);
-  av_buffer_unref(&hw_frames_ctx);
-  delete input_handler;
-  delete decoder_handler;
-  delete encoder_handler;
-  delete output_handler;
-  if (pseg_) pseg_->close();
+    controller_config.encoder_config.abr = false;
+    vector<EncoderParam> encoder_params;
+    EncoderParam resolution_1 = {3840,2160,12500000};
+    EncoderParam resolution_2 = {2560,1440,6500000};
+    EncoderParam resolution_3 = {1920,1080,3000000};
+    EncoderParam resolution_4 = {1280,720,1500000};
+    encoder_params.push_back(resolution_1);
+    encoder_params.push_back(resolution_2);
+    encoder_params.push_back(resolution_3);
+    encoder_params.push_back(resolution_4);
+    controller_config.encoder_config.params = encoder_params;
+    controller_config.encoder_config.frame_rate = AVRational{60,1};
+    controller_config.encoder_config.time_base = AVRational{1,90000};
+    controller_config.encoder_config.use_gpu = true;
+    controller_config.encoder_config.preset = "p4";
+    controller_config.encoder_config.encoder_type = EncoderType::H265;
+
+    controller_config.output_config.output_type = OutputType::SRT;
+    vector<OutputParam> output_params;
+    OutputParam addr_1 = {nullptr, "./out1.mp4"};
+    OutputParam addr_2 = {nullptr, "./out2.mp4"};
+    OutputParam addr_3 = {nullptr, "./out3.mp4"};
+    OutputParam addr_4 = {nullptr, "./out4.mp4"};
+    output_params.push_back(addr_1);
+    output_params.push_back(addr_2);
+    output_params.push_back(addr_3);
+    output_params.push_back(addr_4);
+    controller_config.output_config.params = output_params;
+
+    create_streaming_pipeline();
 }
 
-/* 엔트리 */
-void Controller::start() {
-  controller_config.main_input_path   = "/home/ubuntu/ffai-lab/assets/akina.mp4";
-  controller_config.backup_input_path = "srt://0.0.0.0:8081?mode=listener&latency=600&rcvbuf=32768000";
-
-  controller_config.filter_config.filter_type = FilterType::NONE;
-  controller_config.filter_config.use_gpu     = false;
-
-  // 초기값(디코더와 동기화 예정)
-  controller_config.encoder_config.width       = 1440;
-  controller_config.encoder_config.height      = 1080;
-  controller_config.encoder_config.bit_rate    = 20000000;
-  controller_config.encoder_config.frame_rate  = AVRational{30, 1};
-  controller_config.encoder_config.time_base   = av_inv_q(controller_config.encoder_config.frame_rate);
-  controller_config.encoder_config.use_gpu     = false;
-  controller_config.encoder_config.preset      = "fast";
-  controller_config.encoder_config.encoder_type = EncoderType::H264;
-
-  // TS 컨테이너 사용 (확장자 .ts 권장)
-  controller_config.output_config.output_path  = "/home/ubuntu/ffai-lab/assets/akina_filtered.ts";
-
-  create_streaming_pipeline();
-}
-
-/* (옵션) GPU 초기화 — CPU면 사용 안 함 */
-bool Controller::init_hw_device() {
-  int ret = av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
-  if (ret < 0) {
-    Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "error init hw device", ret);
-    return false;
-  }
-  hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
-  if (!hw_frames_ctx) return false;
-
-  AVHWFramesContext* fctx = (AVHWFramesContext*)hw_frames_ctx->data;
-  fctx->format = AV_PIX_FMT_CUDA;
-  fctx->sw_format = AV_PIX_FMT_NV12;
-  fctx->width  = controller_config.encoder_config.width;
-  fctx->height = controller_config.encoder_config.height;
-  fctx->initial_pool_size = 8;
-
-  if ((ret = av_hwframe_ctx_init(hw_frames_ctx)) < 0) return false;
-  return true;
-}
-
-int Controller::interrupt_cb(void* opaque) {
-  auto* self = static_cast<Controller*>(opaque);
-  const int64_t now = av_gettime_relative();
-  return (now - self->last_io_ts_us.load()) > self->io_timeout_us ? 1 : 0;
-}
-
-/* 입력 초기화 */
-bool Controller::init_input() {
-  input_handler = new InputHandler(controller_config.main_input_path, controller_config.backup_input_path);
-
-  main_input_ctx = input_handler->get_main_input_context();
-  if (!main_input_ctx) return false;
-
-  main_video_stream = input_handler->get_main_video_stream();
-  main_input_ctx->interrupt_callback.callback = &Controller::interrupt_cb;
-  main_input_ctx->interrupt_callback.opaque   = this;
-
-  active_input_ctx    = main_input_ctx;
-  active_video_stream = main_video_stream;
-  return true;
-}
-
-/* 디코더 초기화 */
-bool Controller::init_decoder() {
-  decoder_handler = new DecoderHandler();
-  dec_ctx = decoder_handler->get_decoder_codec_context(active_video_stream, nullptr);
-  if (!dec_ctx) return false;
-
-  dec_ctx->thread_count = 1;
-  return true;
-}
-
-/* personseg 초기화 (현재 사용 안 하거나 pass-through 가능) */
-bool Controller::init_filter() {
-  pseg_ = std::make_unique<PersonSegProcessor>();
-
-  BOOST_LOG(debug) << "personseg model path = " << controller_config.filter_config.model_path;
-
-  use_personseg_ = pseg_->init(
-    controller_config.filter_config.model_path.c_str(),
-    /*in_w*/ 192, /*in_h*/ 192,
-    /*thr*/  0.5f,
-    /*threads*/ 1,
-    /*src_w*/ dec_ctx->width,
-    /*src_h*/ dec_ctx->height,
-    /*src_fmt*/ (AVPixelFormat)dec_ctx->pix_fmt
-  );
-
-  if (!use_personseg_) {
-    BOOST_LOG(debug) << "PersonSegProcessor init failed; bypassing person-seg";
-    pseg_.reset();
-  }
-  return true;
-}
-
-/* 인코더 초기화 (디코더와 동기화) */
-bool Controller::init_encoder() {
-  controller_config.encoder_config.width  = dec_ctx->width;
-  controller_config.encoder_config.height = dec_ctx->height;
-
-  AVRational src_fps = active_video_stream->r_frame_rate;
-  if (!valid_rate(src_fps)) src_fps = AVRational{30,1};
-
-  controller_config.encoder_config.frame_rate = src_fps;
-  controller_config.encoder_config.time_base  = av_inv_q(controller_config.encoder_config.frame_rate);
-
-  if (controller_config.encoder_config.use_gpu) {
-    if (!hw_device_ctx && !init_hw_device()) {
-      Logger::get_instance().print_log(AV_LOG_ERROR, "HW device init failed; fallback to CPU encoding");
-      controller_config.encoder_config.use_gpu = false;
+bool Controller::init_hw_device()
+{
+    Timer init_time_check;
+    int ret =  av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0);
+    if (ret < 0)
+    {
+        Logger::get_instance().print_log_with_reason(AV_LOG_ERROR,"error init hw device",ret);
+        return false;
     }
-  }
 
-  encoder_handler = new EncoderHandler(controller_config.encoder_config);
-  enc_ctx = encoder_handler->get_encoder_codec_context(
-    controller_config.encoder_config.use_gpu ? hw_device_ctx : nullptr
-  );
-  if (!enc_ctx) return false;
+    hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
+    if(!hw_frames_ctx) return false;
 
-  return true;
+    AVHWFramesContext* fctx = (AVHWFramesContext*)hw_frames_ctx->data;
+    fctx->format = AV_PIX_FMT_CUDA;
+    fctx->sw_format = AV_PIX_FMT_NV12;
+    fctx->width = 3840;
+    fctx->height = 2160;
+    fctx->initial_pool_size = 8;
+    if((ret = av_hwframe_ctx_init(hw_frames_ctx)) < 0)
+        return false;
+    BOOST_LOG(debug) << "[HW DEVICE] init time : " << init_time_check.elapsed();
+    return true;
 }
 
-/* 출력 초기화 */
-bool Controller::init_output() {
-  controller_config.output_config.enc_ctx = enc_ctx;
-  output_handler = new OutputHandler(controller_config.output_config);
-  out_fmt_ctx    = output_handler->get_output_format_context();
-  output_stream  = output_handler->get_output_stream();
-  if (!out_fmt_ctx || !output_stream) return false;
-
-  // 스트림 time_base/avg_frame_rate는 OutputHandler에서 enc_ctx 기준으로 설정됨
-  return true;
+int Controller::interrupt_cb(void* opaque)
+{
+    auto* self = static_cast<Controller*>(opaque);
+    const int64_t now = av_gettime_relative();
+    return (now - self->last_io_ts_us.load()) > self->io_timeout_us ? 1 : 0;
 }
 
-/* 전체 초기화 순서 */
-bool Controller::initialize() {
-  if (!init_input())   return false;
-  if (!init_decoder()) return false;
-  if (!init_filter())  return false;
-  if (!init_encoder()) return false;
-  if (!init_output())  return false;
-  return true;
+
+bool Controller::init_input()
+{
+    Timer init_time_check;
+    input_handler = new InputHandler(controller_config.main_input_path, controller_config.backup_input_path);
+    
+    main_input_ctx = input_handler->get_main_input_context();
+    if(!main_input_ctx)
+        return false;
+    
+    main_video_streams = input_handler->get_main_video_stream();
+
+    // backup_input_ctx = input_handler->get_backup_input_context();
+    // backup_video_streams = input_handler->get_backup_video_stream();
+
+    
+
+    // main_input_ctx->interrupt_callback.callback = &Controller::interrupt_cb;
+    // main_input_ctx->interrupt_callback.opaque = this;
+
+    // if(backup_input_ctx)
+    // {
+    //     backup_input_ctx->interrupt_callback.callback = &Controller::interrupt_cb;
+    //     backup_input_ctx->interrupt_callback.opaque = this;
+    // }
+
+    active_input_ctx = main_input_ctx;
+    active_video_streams = main_video_streams;
+
+    // last_io_ts_us.store(av_gettime_relative());
+
+    // main_alive.store(true);
+    // backup_alive.store(backup_input_ctx != nullptr);
+    BOOST_LOG(debug) << "[INPUT] init time : " << init_time_check.elapsed();
+    return true;
 }
 
-/* 입력 스레드 */
+bool Controller::init_decoder()
+{
+    Timer init_time_check;
+
+    decoder_handler = new DecoderHandler();
+    dec_ctxs = decoder_handler->get_decoder_codec_context(active_video_streams, hw_device_ctx);
+    for(auto dec : dec_ctxs)
+    {
+        av_buffer_unref(&dec.second->hw_frames_ctx);
+        dec.second->hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+        dec.second->thread_count = 1;
+    }
+
+    BOOST_LOG(debug) << "[DECODER] init time : " << init_time_check.elapsed();
+
+    if(!dec_ctxs.size())
+        return false;
+    return true;
+}
+
+bool Controller::init_filter()
+{
+    Timer init_time_check;
+    controller_config.filter_config.hw_frames_ctx = av_buffer_ref(hw_frames_ctx);
+    filter_handler = new FilterHandler(controller_config.filter_config);
+    
+    pair<map<int,AVFilterContext*>, AVFilterContext*> buffer = filter_handler->get_filter_context();
+    buffersrc_ctxs = buffer.first;
+    buffersink_ctx = buffer.second;
+
+    BOOST_LOG(debug) << "[FILTER] init time : " << init_time_check.elapsed();
+    if(!buffersrc_ctxs.size() || !buffersink_ctx)
+        return false;
+    return true;
+}
+
+bool Controller::init_encoder()
+{
+    Timer init_time_check;
+
+    encoder_handler = new EncoderHandler(controller_config.encoder_config);
+    enc_ctxs = encoder_handler->get_encoder_codec_context(hw_device_ctx);
+    BOOST_LOG(debug) << "[ENCODER] init time : " << init_time_check.elapsed();
+
+    if(!enc_ctxs.size())
+        return false;
+    return true;
+}
+
+bool Controller::init_output()
+{
+    Timer init_time_check;
+
+    vector<OutputParam> params;
+    for(int i = 0; i < enc_ctxs.size(); i++)
+        controller_config.output_config.params[i].enc_ctx = enc_ctxs[i];
+
+    output_handler = new OutputHandler(controller_config.output_config);
+    out_fmt_ctxs = output_handler->get_output_format_context();
+    output_streams = output_handler->get_output_stream();
+    BOOST_LOG(debug) << "[OUTPUT] init time : " << init_time_check.elapsed();
+
+    if(!out_fmt_ctxs.size())
+        return false;
+    return true;
+}
+
+bool Controller::init_vmaf()
+{
+    for(int i = 0; i < enc_ctxs.size(); i++)
+    {
+        vmaf_handler[i] = new VmafHandler();
+        if(!(vmaf_handler[i]->init(enc_ctxs[i])))
+            return false;
+    }
+    return true;
+}
+
+/*
+공통
+1) 각 TSQueue 길이, push 실패/대기 시간
+2) 스테이지 별 처리시간 히스토그램
+3) 파이프라인 end to end 지연 (입력 PTS -> 출력 Mux DTS)
+*/
+
+
+/*
+Input 
+
+1) 패킷 유입률 측정 : pkt/s (초당 패킷 수) o
+2) 인터 도착 jitter : ts(i) - ts(i-1)의 분산/최대 o
+3) 스트림 타임 스탬프 건강도 : 역행 / 정지 감지
+4) drop 카운트 o
+
+advanced : SRT 레벨에서 송.수신 버퍼 체크, NAK/retrans 수 
+
+*/
+
 void Controller::run_input_thread() {
-  input_thread = std::thread([this]() {
-    BOOST_LOG(debug) << "input thread start";
-    while (flag) {
-      AVPacket* pkt = av_packet_alloc();
-      int ret = av_read_frame(active_input_ctx, pkt);
-      if (ret >= 0) {
-        if (active_input_ctx->streams[pkt->stream_index]->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) {
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
-          av_packet_free(&pkt);
-          continue;
+
+    input_thread = std::thread([this]() {
+        BOOST_LOG(debug) << "[INPUT] input thread start";
+
+        // check packet inflow (1s)
+        Timer check_packet_inflow;
+        int pkt_cnt = 0;
+        size_t pkt_size = 0;
+
+        // check read interval change
+        double max_inter = 0.0;
+        Timer check_interval;
+
+        while (flag) {
+            AVPacket* pkt = av_packet_alloc();
+    
+            int ret = av_read_frame(active_input_ctx, pkt);
+            if(ret >= 0)
+            {
+                if(active_input_ctx->streams[pkt->stream_index]->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) 
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    av_packet_free(&pkt);
+                    continue;
+                }
+                
+                // check read frame interval
+                double cur_inter = round(check_interval.elapsed()*1e7)/1e7;
+                if(cur_inter > max_inter)
+                {
+                    BOOST_LOG(debug) << "[INPUT] packet receive interval increased : " << max_inter;
+                    max_inter = cur_inter;
+                }    
+                check_interval.reset();
+
+                AVPacket* copy = av_packet_alloc();
+                av_packet_ref(copy, pkt);
+                
+                if(check_packet_inflow.elapsed() < 1.0)
+                {
+                    pkt_cnt++;
+                    pkt_size += pkt->size;
+                }
+                else
+                {
+                    BOOST_LOG(debug) << "[INPUT] packet inflow rate : " << pkt_cnt << "/s , flow size : " << pkt_size;
+                    pkt_cnt = 0;
+                    pkt_size = 0;
+                    check_packet_inflow.reset();
+                }
+
+                input_queue.push(copy);                
+                av_packet_free(&pkt);
+            }
+            else
+            {
+                // Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "input read error.", ret);
+                av_packet_free(&pkt);
+            }
         }
-        AVPacket* copy = av_packet_alloc();
-        av_packet_ref(copy, pkt);
-        input_queue.push(copy);
-        av_packet_free(&pkt);
-      } else if (ret == AVERROR_EOF) {
-        av_packet_free(&pkt);
-        break;
-      } else {
-        Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "input read error.", ret);
-        av_packet_free(&pkt);
-        break;
-      }
-    }
-    input_queue.stop();
-  });
+        BOOST_LOG(debug) << "[INPUT] input loop exit";
+        input_queue.stop();
+    });
 }
 
-/* 디코더 스레드 */
+/*
+Decoder
+
+1) 디코딩 지연 : send packet -> receive frame 까지 
+2) 프레임 처리률 : frame/s
+3) 프레임 드롭/리커버리 (에러/reorder 실패 등) 카운트 o
+4) 코덱 별 경고/ 재동기화 이벤트
+*/
+
+
 void Controller::run_decoder_thread() {
-  decoder_thread = std::thread([this]() {
-    AVPacket* pkt = nullptr;
-    while (flag && input_queue.pop(pkt)) {
-      int ret = avcodec_send_packet(dec_ctx, pkt);
-      av_packet_free(&pkt);
-      if (ret < 0) {
-        Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "decoder send error", ret);
-        continue;
-      }
-      while (true) {
-        AVFrame* frame = av_frame_alloc();
-        ret = avcodec_receive_frame(dec_ctx, frame);
-        if (ret >= 0) {
-          if (frame->pts == AV_NOPTS_VALUE) {
-            int64_t best = frame->best_effort_timestamp;
-            if (best != AV_NOPTS_VALUE) frame->pts = best;
-          }
-          decoder_queue.push(frame);
-        } else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-          av_frame_free(&frame);
-          break;
-        } else {
-          Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "decoder receive error", ret);
-          av_frame_free(&frame);
-          break;
-        }
-      }
-    }
 
-    // 디코더 플러시
-    avcodec_send_packet(dec_ctx, nullptr);
-    while (true) {
-      AVFrame* frame = av_frame_alloc();
-      int ret = avcodec_receive_frame(dec_ctx, frame);
-      if (ret >= 0) {
-        if (frame->pts == AV_NOPTS_VALUE) {
-          int64_t best = frame->best_effort_timestamp;
-          if (best != AV_NOPTS_VALUE) frame->pts = best;
-        }
-        decoder_queue.push(frame);
-      } else {
-        av_frame_free(&frame);
-        break;
-      }
-    }
+    decoder_thread = std::thread([this]() {
+        BOOST_LOG(debug) << "[DECODER] decoder thread start";
+        AVPacket* pkt = nullptr;
 
-    decoder_queue.stop();
-  });
+        Timer check_frame_inflow;
+        int frame_cnt = 0;
+
+        while (flag && input_queue.pop(pkt)) {
+            int idx = pkt->stream_index;
+            if(!buffersrc_ctxs[idx])
+            {
+                av_packet_free(&pkt);
+                continue;
+            }
+            int ret = avcodec_send_packet(dec_ctxs[idx], pkt);
+            if (ret < 0) {
+                Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "[DECODER] decoder send error", ret);
+                av_packet_free(&pkt);
+                continue;
+            }
+                
+            int drop_cnt = 0;
+            int64_t last_pts = AV_NOPTS_VALUE;
+
+            while (true) {
+                AVFrame* frame = av_frame_alloc();
+                int ret = avcodec_receive_frame(dec_ctxs[idx], frame);
+                if (ret >= 0) {
+
+                    if(last_pts != AV_NOPTS_VALUE && frame->pts < last_pts)
+                        BOOST_LOG(error) << "[DECODER] frame reorder failed.";
+                    last_pts = frame->pts;
+
+                    frame->opaque = (void*)(intptr_t)idx;
+                    decoder_queue.push(frame);
+
+                    if(check_frame_inflow.elapsed() < 1.0)
+                        frame_cnt++;
+                    else
+                    {
+                        BOOST_LOG(debug) << "[DECODER] frame inflow rate : " << frame_cnt << "/s";
+                        frame_cnt = 0;
+                        check_frame_inflow.reset();
+                    }
+                }
+                else
+                {
+                    if(ret == AVERROR_INVALIDDATA)
+                    {
+                        BOOST_LOG(error) << "[DECODER] frame dropped.";
+                        drop_cnt++;
+                    }
+                    else if(ret != AVERROR(EAGAIN))
+                        Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "decoder receive error.", ret);
+                    av_frame_free(&frame);
+                    break;
+                }
+            }
+            if(drop_cnt)
+                BOOST_LOG(debug) << "[DECODER] dropped frame count : " << drop_cnt;
+            av_packet_free(&pkt);
+        }
+        BOOST_LOG(debug) << "[DECODER] decoder loop exit";
+        decoder_queue.stop();
+    });
 }
 
-/* personseg 스레드 (현재 pass-through 처리 포함) */
+static inline bool is_hw_frame_fmt(int fmt) { return fmt == AV_PIX_FMT_CUDA; }
+
+static AVPixelFormat pick_swfmt_from_dec(AVCodecContext* dec) {
+    if (dec && dec->hw_frames_ctx) {
+        auto* fctx = (AVHWFramesContext*)dec->hw_frames_ctx->data;
+        if (fctx && fctx->sw_format != AV_PIX_FMT_NONE) return (AVPixelFormat)fctx->sw_format;
+    }
+    return AV_PIX_FMT_NV12;
+}
+
+/*
+Filter
+
+1) buffersrc_add_frame 대기/지연 (ms)
+2) buffersink_get_frame 루프 당 산출률,지연
+3) filter 그래프 지연 : 입력 pts -> 출력 pts jitter
+4) frame drop 
+5) GPU 사용률 / 메모리 (NVML 연동)
+
+*/
+
 void Controller::run_filter_thread() {
-  filter_thread = std::thread([this]() {
-    AVFrame* frame = nullptr;
-    while (flag && decoder_queue.pop(frame)) {
-      // personseg 사용 시: out 프레임에 그려서 전달
-      if (pseg_) {
-        AVFrame* out = av_frame_alloc();
-        out->format = AV_PIX_FMT_YUV420P;
-        out->width  = frame->width;
-        out->height = frame->height;
-        if (av_frame_get_buffer(out, 32) < 0) {
-          av_frame_free(&out);
-          // 실패 시 원본 그대로 패스스루
-          filter_queue.push(frame);
-          continue;
-        }
-        av_frame_copy_props(out, frame);
 
-        int pr = pseg_->process(frame, out);
-        if (pr == 0) {
-          av_frame_free(&frame);
-          filter_queue.push(out);
-        } else {
-          Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "personseg process failed", pr);
-          av_frame_free(&out);
-          // 실패 시 원본 그대로 전달 (소유권 유지)
-          filter_queue.push(frame);
-        }
-      } else {
-        // personseg 미사용: 패스스루
-        filter_queue.push(frame);
-      }
-    }
-    filter_queue.stop();
-  });
-}
+    filter_thread = std::thread([this]() {
+        BOOST_LOG(debug) << "[FILTER] filter thread start";
+        AVFrame* frame = nullptr;
+        while (flag && decoder_queue.pop(frame)) {
+            int idx = (int)(intptr_t)frame->opaque;
 
-/* 인코더 스레드 — 입력 tb로 누적 PTS 생성 → enc_tb로 1회 변환 */
-void Controller::run_encoder_thread() {
-  encoder_thread = std::thread([this]() {
-    AVFrame* frame = nullptr;
-
-    TSQueue<AVFrame*>& src_queue = use_personseg_ ? filter_queue : decoder_queue;
-
-    const AVRational in_tb  = active_video_stream->time_base; // 보통 {1/90000}
-    const AVRational enc_tb = enc_ctx->time_base;             // {1/fps}
-    AVRational src_fps = active_video_stream->r_frame_rate;
-    if (!valid_rate(src_fps)) src_fps = AVRational{30,1};
-
-    const int64_t in_frame_dur = av_rescale_q(1, av_inv_q(src_fps), in_tb);
-    int64_t next_in_pts = AV_NOPTS_VALUE; // 입력 tb 기준 누적 pts
-
-    while (flag && src_queue.pop(frame)) {
-      frame->pict_type = AV_PICTURE_TYPE_NONE;
-
-      // 입력 tb 기반의 일관된 pts 만들기
-      int64_t in_pts = frame->pts;
-      if (in_pts == AV_NOPTS_VALUE) {
-        if (next_in_pts == AV_NOPTS_VALUE) next_in_pts = 0;
-        in_pts = next_in_pts;
-        next_in_pts += in_frame_dur;
-      } else {
-        if (next_in_pts == AV_NOPTS_VALUE) next_in_pts = in_pts + in_frame_dur;
-        else next_in_pts = std::max(next_in_pts, in_pts + in_frame_dur);
-      }
-
-      // enc_tb로 1회 변환
-      frame->pts = av_rescale_q(in_pts, in_tb, enc_tb);
-
-      // 필요 시 YUV420P로 변환
-      AVFrame* to_send = frame;
-      if (enc_ctx->pix_fmt == AV_PIX_FMT_YUV420P && frame->format != AV_PIX_FMT_YUV420P) {
-        AVFrame* yuv = av_frame_alloc();
-        yuv->format = AV_PIX_FMT_YUV420P;
-        yuv->width  = frame->width;
-        yuv->height = frame->height;
-        if (av_frame_get_buffer(yuv, 32) == 0) {
-          SwsContext* sws = sws_getContext(frame->width, frame->height, (AVPixelFormat)frame->format,
-                                           yuv->width, yuv->height, AV_PIX_FMT_YUV420P,
-                                           SWS_BILINEAR, nullptr, nullptr, nullptr);
-          if (sws) {
-            const uint8_t* src_data[4] = { frame->data[0], frame->data[1], frame->data[2], nullptr };
-            int            src_ls[4]   = { frame->linesize[0], frame->linesize[1], frame->linesize[2], 0 };
-            uint8_t*       dst_data[4] = { yuv->data[0], yuv->data[1], yuv->data[2], nullptr };
-            int            dst_ls[4]   = { yuv->linesize[0], yuv->linesize[1], yuv->linesize[2], 0 };
-            sws_scale(sws, src_data, src_ls, 0, frame->height, dst_data, dst_ls);
-            sws_freeContext(sws);
-            av_frame_copy_props(yuv, frame);
-            yuv->pts = frame->pts; // enc_tb 기준
+            int ret = av_buffersrc_add_frame_flags(buffersrc_ctxs[idx], frame, 0);
+            if(ret < 0)
+            {
+                Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "[FILTER] add filter buffer source error.", ret);
+            }
             av_frame_free(&frame);
-            to_send = yuv;
-          } else {
-            av_frame_free(&yuv);
-          }
-        } else {
-          av_frame_free(&yuv);
+
+            while (true) {
+                AVFrame* filt_frame = av_frame_alloc();
+                ret = av_buffersink_get_frame(buffersink_ctx, filt_frame);
+                if (ret >= 0) {
+                    filter_queue.push(filt_frame);
+                }
+                else {
+                    if(ret != AVERROR(EAGAIN))
+                        Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "[FILTER] filter buffer sink error.", ret);
+                    av_frame_free(&filt_frame);
+                    break;
+                }
+            }
         }
-      }
-
-      int ret = avcodec_send_frame(enc_ctx, to_send);
-      av_frame_free(&to_send);
-      if (ret < 0) {
-        Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "avcodec_send_frame failed", ret);
-        continue;
-      }
-
-      // 패킷 수거
-      while (true) {
-        AVPacket* pkt = av_packet_alloc();
-        ret = avcodec_receive_packet(enc_ctx, pkt);
-        if (ret >= 0) {
-          if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = pkt->pts; // DTS 보정
-          if (pkt->duration == 0) pkt->duration = 1;           // enc_tb 기준 1 프레임
-          AVPacket* copy = av_packet_alloc();
-          av_packet_ref(copy, pkt);
-          encoder_queue.push(copy);
-          av_packet_unref(pkt);
-        } else {
-          av_packet_unref(pkt);
-          break;
-        }
-      }
-    }
-
-    // 인코더 플러시
-    avcodec_send_frame(enc_ctx, nullptr);
-    while (true) {
-      AVPacket* pkt = av_packet_alloc();
-      int ret = avcodec_receive_packet(enc_ctx, pkt);
-      if (ret >= 0) {
-        if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = pkt->pts;
-        if (pkt->duration == 0) pkt->duration = 1;
-        AVPacket* copy = av_packet_alloc();
-        av_packet_ref(copy, pkt);
-        encoder_queue.push(copy);
-        av_packet_unref(pkt);
-      } else {
-        av_packet_unref(pkt);
-        break;
-      }
-    }
-
-    encoder_queue.stop();
-  });
+        BOOST_LOG(debug) << "[FILTER] filter loop exit";
+        filter_queue.stop();
+    });
 }
 
-/* 출력 스레드 — enc_tb → mux_tb(스트림 tb)로 1회 리스케일 */
+/*
+Encoder
+
+1) 인코딩 지연 : send frame -> receive pakcet 까지 (ms)
+2) 산출 비트레이트
+3) frame type 분포 : IDR/I/P/B 카운트
+4) QP(평균 or 최대 or 분산) 또는 슬라이스 레벨 QP delta
+5) VBV 근사 : 순간 bit burst, 언더런 징후 (프레임 길이 변동성)
+6) HDR 메타 : mastering display / content light level (있는 경우) 
+
+*/
+
+void Controller::run_encoder_thread() {
+
+    encoder_thread = std::thread([this]() {
+        BOOST_LOG(debug) << "[ENCODER] encoder thread start";
+        AVFrame* frame = nullptr;
+        TSQueue<AVFrame*>& src_queue = controller_config.filter_config.filter_type != FilterType::NONE ? filter_queue : decoder_queue;
+        
+        auto score_sum = make_shared<vector<atomic<double>>>(enc_ctxs.size());
+        auto score_cnt = make_shared<vector<atomic<int>>>(enc_ctxs.size());
+        map<int,Timer*> timers;
+
+        for(int i = 0; i < enc_ctxs.size(); i++)
+        {
+            timers[i] = new Timer();
+            (*score_sum)[i].store(0.0, memory_order_release);
+            (*score_cnt)[i].store(0, memory_order_release);
+        }
+
+
+        while (flag && src_queue.pop(frame)) {
+            for(int i = 0; i < (int)enc_ctxs.size(); i++)
+            {
+                AVFrame* in = av_frame_alloc();
+                if(av_frame_ref(in, frame) < 0)
+                {
+                    BOOST_LOG(debug) << "[ENCODER] av_frame_ref frame to in failed";
+                    av_frame_free(&in);
+                    continue;
+                }
+
+                AVFrame* dst = nullptr;
+                int er = encoder_handler->scale_frame(i, in, &dst);
+                if (er < 0 || !dst) {
+                    BOOST_LOG(error) << "[ENCODER] scale_frame failed: " << er
+                                    << " (in_fmt=" << in->format
+                                    << ", in=" << in->width << "x" << in->height
+                                    << ", out=" << enc_ctxs[i]->width << "x" << enc_ctxs[i]->height << ")";
+                    av_frame_free(&in);
+                    continue;
+                }
+                av_frame_free(&in);
+
+                AVFrame* ref_clone = vmaf_handler[i]->make_ref_for_vmaf(dst, enc_ctxs[i]->width, enc_ctxs[i]->height);
+                if (!ref_clone)
+                {
+                    av_frame_free(&dst);
+                    continue; 
+                }
+                dst->opaque = ref_clone;
+
+                int sret = avcodec_send_frame(enc_ctxs[i], dst);
+                if (sret < 0) {
+                    Logger::get_instance().print_log_with_reason(AV_LOG_ERROR, "send_frame failed", sret);
+                    // send 실패 시 직접 해제
+                    av_frame_free(&ref_clone);
+                    av_frame_free(&dst);
+                    continue;
+                }
+    
+                while (true) {
+                    AVPacket* pkt = av_packet_alloc();
+                    int ret = avcodec_receive_packet(enc_ctxs[i], pkt);
+                    
+                    if (ret >= 0) {
+                        AVPacket* copy = av_packet_alloc();
+                        av_packet_ref(copy, pkt);
+                        
+                        // int는 4byte이므로 8byte void*에 그대로 담을 시 4byte garbage 발생
+                        // intptr_t는 손실없이 포인터 변환이 가능하므로 승격이 필요하고, static_cast로 정수 영역에서 안전 승격
+                        copy->opaque = reinterpret_cast<void*>(static_cast<intptr_t>(i));
+                        encoder_queue.push(copy);
+    
+                        // 1초 주기로 전송 시 VCL NAL unit 실패, 그냥 연달아 전송 시 성공
+                        // vmaf handler의 dec ctx에서 참조 체인이 깨져서 실패함
+                        // 주기적으로 보내려면 IDR만 전송해야함 
+    
+                        AVFrame* vmaf_ref_frame = reinterpret_cast<AVFrame*>(pkt->opaque);
+                        if(!vmaf_ref_frame)
+                        {
+                            av_packet_free(&pkt);
+                            continue;
+                        }
+
+                        if((pkt->flags & AV_PKT_FLAG_KEY) && timers[i]->elapsed() >= 4)
+                        {
+                            AVPacket* vmaf_ref_pkt = av_packet_alloc();
+                            av_packet_ref(vmaf_ref_pkt, pkt);
+
+                            // std::thread([this,vmaf_ref_pkt,vmaf_ref_frame,score_sum,score_cnt,i](){
+                                try
+                                {
+                                    double score = vmaf_handler[i]->get_score(vmaf_ref_frame, vmaf_ref_pkt);
+                                    if(score)
+                                    {
+                                        BOOST_LOG(debug) << "[VMAF] score ("<< i <<") : " << score;
+                                        double old_val = (*score_sum)[i].load(std::memory_order_relaxed);
+                                        while (!(*score_sum)[i].compare_exchange_weak(
+                                                old_val, old_val + score,
+                                                std::memory_order_release,
+                                                std::memory_order_relaxed)) {}
+        
+                                        (*score_cnt)[i].fetch_add(1,memory_order_relaxed);
+                                    }
+                                }
+                                catch(const exception& e)
+                                {
+                                    BOOST_LOG(error) << "[VMAF] exception : " << e.what();
+                                }
+                                catch(...)
+                                {
+                                    BOOST_LOG(error) << "[VMAF] unknown exception occurred";
+                                }
+                                
+                            // }).detach();
+                            
+                            if((*score_cnt)[i].load(memory_order_acquire) >= 10)
+                            {
+                                int cnt = (*score_cnt)[i].exchange(0, memory_order_acq_rel);
+                                double sum = (*score_sum)[i].exchange(0.0, memory_order_acq_rel);
+                                double average = (sum / (double)cnt);
+                                bool is_ok = (average >= 90) ? true : false;
+                                BOOST_LOG(debug) << "[VMAF] average score ("<< i <<") : " << average << " pass (" << is_ok << ")";
+                            }
+                            timers[i]->reset();
+                        }
+                        else
+                            av_frame_free(&vmaf_ref_frame);
+                        av_packet_free(&pkt);
+                    }
+                    else
+                    {
+                        av_packet_free(&pkt);
+                        break;
+                    }
+                }
+                av_frame_free(&dst);
+            }
+            av_frame_free(&frame);
+        }
+        BOOST_LOG(debug) << "encoder loop exit";
+        encoder_queue.stop();
+    });
+}
+
+/*
+Output
+
+1) Mux 지연 : av_interleaved_write_frame 호출 지연
+2) 타임 베이스 재스케일 정확성 (역행/음수 DTS 방지 카운트)
+3) 송출 비트레이트, 송출 프레임률
+4) SRT 송출 재전송 / 패킷 드롭
+
+*/
+
 void Controller::run_output_thread() {
-  output_thread = std::thread([this]() {
-    AVPacket* pkt = nullptr;
 
-    const AVRational enc_tb = enc_ctx->time_base;
-    const AVRational mux_tb = output_stream->time_base; // 강제 1/90000 금지, 스트림 tb 사용
+    output_thread = std::thread([this]() {
+        BOOST_LOG(debug) << "output thread start";
+        AVPacket* pkt = nullptr;
+        while (flag && encoder_queue.pop(pkt)) {
 
-    while (flag && encoder_queue.pop(pkt)) {
-      pkt->stream_index = output_stream->index;
+            int abr_idx = static_cast<int>(reinterpret_cast<intptr_t>(pkt->opaque));
 
-      if (pkt->dts == AV_NOPTS_VALUE) pkt->dts = pkt->pts;
-      if (pkt->duration <= 0) pkt->duration = 1; // enc_tb 기준 1 프레임
+            pkt->stream_index = output_streams[abr_idx]->index;
+            pkt->pts = av_rescale_q(pkt->pts, enc_ctxs[abr_idx]->time_base, output_streams[abr_idx]->time_base);
+            pkt->dts = av_rescale_q(pkt->dts, enc_ctxs[abr_idx]->time_base, output_streams[abr_idx]->time_base);
+            pkt->duration = av_rescale_q(pkt->duration, enc_ctxs[abr_idx]->time_base, output_streams[abr_idx]->time_base);
 
-      // 1회 리스케일
-      pkt->pts      = av_rescale_q(pkt->pts,      enc_tb, mux_tb);
-      pkt->dts      = av_rescale_q(pkt->dts,      enc_tb, mux_tb);
-      pkt->duration = av_rescale_q(pkt->duration, enc_tb, mux_tb);
-
-      av_interleaved_write_frame(out_fmt_ctx, pkt);
-      av_packet_free(&pkt);
-    }
-    // 트레일러는 메인 스레드에서 호출
-  });
+            BOOST_LOG(debug) << "PKT : abr (" << abr_idx << ") " << pkt->pts << " " << pkt->dts << " " << pkt->duration << " " << pkt->time_base.num << "/" << pkt->time_base.den << " ";
+            av_interleaved_write_frame(out_fmt_ctxs[abr_idx], pkt);
+            // av_write_frame(out_fmt_ctx, pkt);
+            av_packet_free(&pkt);
+        }
+        BOOST_LOG(debug) << "output loop exit";
+        for(int i = 0; i < (int)out_fmt_ctxs.size(); i++)
+            av_write_trailer(out_fmt_ctxs[i]);
+    });
 }
 
-/* 파이프라인 구동 */
 void Controller::create_streaming_pipeline() {
-  if (!initialize()) return;
-  flag = true;
+    flag = true;
 
-  run_input_thread();
-  run_decoder_thread();
+    init_hw_device();
+    init_filter();
 
-  if (use_personseg_) {
+    init_encoder();
+    init_vmaf();
+
+    init_input();
+    init_decoder();
+    init_output();
+
+    run_input_thread();
+    run_decoder_thread();
     run_filter_thread();
-  }
+    run_encoder_thread();
+    run_output_thread();
 
-  run_encoder_thread();
-  run_output_thread();
-
-  input_thread.join();
-  decoder_thread.join();
-  if (use_personseg_) filter_thread.join();
-  encoder_thread.join();
-  output_thread.join();
-
-  // 모든 쓰기 종료 후 트레일러 → flush → close
-  av_write_trailer(out_fmt_ctx);
-  if (out_fmt_ctx && out_fmt_ctx->pb) {
-    avio_flush(out_fmt_ctx->pb);
-    avio_closep(&out_fmt_ctx->pb);
-  }
+    input_thread.join();
+    BOOST_LOG(debug) << "input_thread join finish";
+    decoder_thread.join();
+    BOOST_LOG(debug) << "decoder_thread join finish";
+    filter_thread.join();
+    BOOST_LOG(debug) << "filter_thread join finish";
+    encoder_thread.join();
+    BOOST_LOG(debug) << "encoder_thread join finish";
+    output_thread.join();
+    BOOST_LOG(debug) << "output_thread join finish";
 }

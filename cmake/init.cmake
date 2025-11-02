@@ -15,6 +15,7 @@ list(APPEND TARGET_FILES
   "${CMAKE_SOURCE_DIR}/src/output/src/OutputHandler.cpp"
   "${CMAKE_SOURCE_DIR}/src/core/src/Controller.cpp"
   "${CMAKE_SOURCE_DIR}/src/util/src/Logger.cpp"
+  "${CMAKE_SOURCE_DIR}/src/vmaf/src/VmafHandler.cpp"
 )
 
 list(APPEND HEADER_FILES
@@ -26,6 +27,7 @@ list(APPEND HEADER_FILES
   "${CMAKE_SOURCE_DIR}/src/output/inc"
   "${CMAKE_SOURCE_DIR}/src/util/inc"
   "${CMAKE_SOURCE_DIR}/src/core/inc"
+  "${CMAKE_SOURCE_DIR}/src/vmaf/inc"
 )
 
 set(PKG_CONFIG_USE_STATIC OFF)

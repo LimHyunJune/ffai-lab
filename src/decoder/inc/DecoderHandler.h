@@ -13,12 +13,12 @@ using namespace std;
 class DecoderHandler
 {
     private:
-        AVCodecContext* dec_ctx;
+        map<int, AVCodecContext*> dec_ctxs;
         const AVCodec* get_decoder_codec(AVCodecID codec_id, bool use_gpu);
 
     public:
         DecoderHandler();
         ~DecoderHandler();
 
-       AVCodecContext* get_decoder_codec_context(AVStream* video_stream, AVBufferRef* hw_device_ctx = nullptr);
+        map<int,AVCodecContext*> get_decoder_codec_context(vector<AVStream*> video_streams, AVBufferRef* hw_device_ctx = nullptr);
 };
