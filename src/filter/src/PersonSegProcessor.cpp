@@ -1,10 +1,10 @@
 #include "PersonSegProcessor.h"
-#include <algorithm>
-#include <cstring>
+#include "Logger.h"
 #include <cmath>
+#include <cstring>
 
 // ======================
-// 도우미 함수 / SWS 보장
+// SWS 보장
 // ======================
 
 bool PersonSegProcessor::ensure_sws_in_to_rgb(AVPixelFormat in_fmt, int inW, int inH) {
@@ -28,7 +28,6 @@ bool PersonSegProcessor::ensure_sws_in_to_rgb(AVPixelFormat in_fmt, int inW, int
                                     SWS_BILINEAR, nullptr, nullptr, nullptr);
     if (!sws_in_to_rgb_) return false;
 
-    // 캐시 갱신
     sws_in_src_w_  = inW;
     sws_in_src_h_  = inH;
     sws_in_src_fmt_= (int)in_fmt;
@@ -75,7 +74,7 @@ bool PersonSegProcessor::ensure_sws_rgb_to_yuv(int outW, int outH) {
 void PersonSegProcessor::rgb_to_chw_resized(const uint8_t* rgb, int srcW, int srcH,
                                             int dstW, int dstH, std::vector<float>& chw3)
 {
-    // 최근접 샘플링
+    // 최근접 (필요시 bilinear로 개선 가능)
     chw3.resize(static_cast<size_t>(3) * dstW * dstH);
     float scaleX = (float)srcW / (float)dstW;
     float scaleY = (float)srcH / (float)dstH;
@@ -111,7 +110,6 @@ void PersonSegProcessor::blend_green_with_mask(AVFrame* dst,
                                                const std::vector<float>& mask,
                                                int maskW, int maskH, float thr, float alpha)
 {
-    // YUV420P planes
     uint8_t* Y = dst->data[0];
     uint8_t* U = dst->data[1];
     uint8_t* V = dst->data[2];
@@ -122,13 +120,13 @@ void PersonSegProcessor::blend_green_with_mask(AVFrame* dst,
     const int W = dst->width;
     const int H = dst->height;
 
-    // "초록"의 YUV (대략 BT.601, sRGB [0,255] 기준: R=0,G=255,B=0)
+    // "초록"의 YUV (대략 BT.601)
     const uint8_t Yg = 150, Ug = 44, Vg = 21;
 
-    // --- Y(휘도): 픽셀 단위 알파 블렌딩 ---
     float sX = (float)maskW / (float)W;
     float sY = (float)maskH / (float)H;
 
+    // Y: 픽셀 단위
     for (int y = 0; y < H; ++y) {
         int my = std::min(maskH - 1, (int)std::floor(y * sY));
         uint8_t* yrow = Y + y * ys;
@@ -137,10 +135,8 @@ void PersonSegProcessor::blend_green_with_mask(AVFrame* dst,
             float m = mask[my * maskW + mx];
             if (m <= 0.f) continue;
 
-            // 연속 블렌딩: a = alpha * soft(m,thr)
             float soft = (thr <= 0.f) ? m : std::max(0.f, (m - thr) / (1.f - thr));
             float a = std::clamp(alpha * soft, 0.f, 1.f);
-
             if (a > 0.f) {
                 int y0 = yrow[x];
                 int y1 = (int)std::round((1.0f - a) * y0 + a * (int)Yg);
@@ -149,18 +145,14 @@ void PersonSegProcessor::blend_green_with_mask(AVFrame* dst,
         }
     }
 
-    // --- U/V(크로마): 4:2:0 → 2×2 블록 평균 알파로 블렌딩 ---
+    // U/V: 4:2:0 → 2x2 블록 평균 알파로 블렌딩
     int CW = (W + 1) >> 1;
     int CH = (H + 1) >> 1;
-
-    float sXc = (float)maskW / (float)(CW << 1); // 크로마 샘플이 커버하는 2x2 블록 기준
-    float sYc = (float)maskH / (float)(CH << 1);
 
     for (int cy = 0; cy < CH; ++cy) {
         uint8_t* urow = U + cy * us;
         uint8_t* vrow = V + cy * vs;
 
-        // 이 크로마 샘플이 커버하는 원본 픽셀 범위(대략)
         int py = cy << 1;
         int my0 = std::min(maskH - 1, (int)std::floor((py + 0.0f) * sY));
         int my1 = std::min(maskH - 1, (int)std::floor((py + 1.0f) * sY));
@@ -171,7 +163,6 @@ void PersonSegProcessor::blend_green_with_mask(AVFrame* dst,
             int mx0 = std::min(maskW - 1, (int)std::floor((px + 0.0f) * sX));
             int mx1 = std::min(maskW - 1, (int)std::floor((px + 1.0f) * sX));
 
-            // 2x2 주변 마스크 평균
             float m00 = mask[my0 * maskW + mx0];
             float m01 = mask[my0 * maskW + mx1];
             float m10 = mask[my1 * maskW + mx0];
@@ -195,10 +186,10 @@ void PersonSegProcessor::blend_green_with_mask(AVFrame* dst,
 }
 
 // ======================
-// Otsu + YCbCr 피부색 기반 마스크
+// 휴리스틱 마스크 (기존 run_mask 본문)
 // ======================
 
-bool PersonSegProcessor::run_mask(const float* chw, int inW, int inH, std::vector<float>& outMask) {
+bool PersonSegProcessor::run_mask_heuristic(const float* chw, int inW, int inH, std::vector<float>& outMask) {
     if (!chw || inW <= 0 || inH <= 0) return false;
 
     const float* R = chw;
@@ -244,16 +235,15 @@ bool PersonSegProcessor::run_mask(const float* chw, int inW, int inH, std::vecto
         }
     }
 
-    // 3) YCbCr 피부색 마스크 (완화된 범위)
+    // 3) YCbCr 피부색 마스크 (완화 범위)
     outMask.assign(N, 0.0f);
 
     for (int i = 0; i < N; ++i) {
-        // RGB[0..1] -> 8bit
         float r = std::clamp(R[i], 0.0f, 1.0f) * 255.0f;
         float g = std::clamp(G[i], 0.0f, 1.0f) * 255.0f;
         float b = std::clamp(B[i], 0.0f, 1.0f) * 255.0f;
 
-        // BT.601 변환
+        // BT.601 근사
         float Y = 16.0f  + (65.481f*r + 128.553f*g + 24.966f*b) / 255.0f;
         float Cb = 128.0f + (-37.797f*r - 74.203f*g + 112.0f*b) / 255.0f;
         float Cr = 128.0f + (112.0f*r - 93.786f*g - 18.214f*b) / 255.0f;
@@ -261,7 +251,6 @@ bool PersonSegProcessor::run_mask(const float* chw, int inW, int inH, std::vecto
         bool skin = (Cb >= 70.f && Cb <= 135.f && Cr >= 125.f && Cr <= 180.f && Y > 16.0f);
         bool otsu = (toY(i) >= threshold);
 
-        // soft mask: 피부면 1, 아니면 Otsu로 보완(0/1)
         outMask[i] = (skin || otsu) ? 1.0f : 0.0f;
     }
 
@@ -304,40 +293,67 @@ bool PersonSegProcessor::run_mask(const float* chw, int inW, int inH, std::vecto
 }
 
 // ======================
+// ONNX 추론
+// ======================
+
+bool PersonSegProcessor::run_mask_onnx(const float* chw, int inW, int inH, std::vector<float>& outMask) {
+    if (!ort_ || !chw || inW<=0 || inH<=0) return false;
+
+    outMask.resize((size_t)inW * inH);
+
+    // personseg_run: 출력은 마지막 2차원이 H×W인 float 텐서라고 가정
+    int got = personseg_run(ort_, chw, /*n=*/1, /*c=*/3, /*hh=*/inH, /*ww=*/inW, outMask.data());
+    if (got != (int)((size_t)inW * inH)) {
+        // 출력 shape mismatch → 폴백 유도
+        return false;
+    }
+
+    // 모델이 확률을 내보낸다면 그대로 사용,
+    // logits라면 아래 시그모이드 주석 해제
+    for (float& v : outMask) {
+        // v = 1.f / (1.f + std::exp(-v)); // 필요 시 활성화
+        if (v < 0.f) v = 0.f;
+        if (v > 1.f) v = 1.f;
+    }
+    return true;
+}
+
+// ======================
 // Public APIs
 // ======================
 
-bool PersonSegProcessor::init(const char* /*model_path*/,
+bool PersonSegProcessor::init(const char* model_path,
                               int in_w, int in_h,
                               float thr,
-                              int /*threads*/,
+                              int threads,
                               int src_w, int src_h,
                               AVPixelFormat src_fmt)
 {
     in_w_   = in_w;
     in_h_   = in_h;
-    mask_thr_= thr;                    // Controller에서 0.3~0.6 정도로 조정
+    mask_thr_= thr;
     src_w_  = src_w;
     src_h_  = src_h;
     src_fmt_= src_fmt;
+    ort_threads_ = std::max(1, threads);
 
-    // sws 컨텍스트는 실제 처리 시점에 생성/갱신
     rgb_buf_.clear();
     input_chw_.clear();
     mask_f_.clear();
 
+    // ORT 세션 생성(모델 경로가 유효할 때만). 실패하면 휴리스틱 폴백으로 동작.
+    ort_ready_ = false;
+    if (model_path && *model_path) {
+        ort_ = personseg_create(model_path, in_w_, in_h_, ort_threads_);
+        if (ort_) ort_ready_ = true;
+    }
     return true;
 }
 
 void PersonSegProcessor::close() {
-    if (sws_in_to_rgb_) {
-        sws_freeContext(sws_in_to_rgb_);
-        sws_in_to_rgb_ = nullptr;
-    }
-    if (sws_rgb_to_yuv_) {
-        sws_freeContext(sws_rgb_to_yuv_);
-        sws_rgb_to_yuv_ = nullptr;
-    }
+    if (sws_in_to_rgb_)  { sws_freeContext(sws_in_to_rgb_);  sws_in_to_rgb_  = nullptr; }
+    if (sws_rgb_to_yuv_) { sws_freeContext(sws_rgb_to_yuv_); sws_rgb_to_yuv_ = nullptr; }
+    if (ort_) { personseg_destroy(&ort_); ort_ready_ = false; }
 }
 
 int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
@@ -353,7 +369,7 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
 
     // 1) src -> RGB24 (동일 해상도)
     if (!ensure_sws_in_to_rgb((AVPixelFormat)src->format, src->width, src->height)) {
-        // 실패 시: src를 바로 YUV420P로 변환만 수행하고 종료
+        // 실패 시: src를 바로 YUV420P로 변환만 수행하고 종료(페일-오픈)
         if (!ensure_sws_rgb_to_yuv(src->width, src->height)) return AVERROR(EIO);
         const uint8_t* in_data[4] = { src->data[0], src->data[1], src->data[2], nullptr };
         int            in_ls [4]  = { src->linesize[0], src->linesize[1], src->linesize[2], 0 };
@@ -377,19 +393,18 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
         sws_scale(sws_in_to_rgb_, in_data, in_ls, 0, src->height, out_data, out_ls);
     }
 
-    // 2) RGB24 -> CHW float (내부 마스크 해상도)
+    // 2) RGB24 -> CHW float (in_w_ x in_h_), [0..1]
     rgb_to_chw_resized(rgb_buf_.data(), src->width, src->height, in_w_, in_h_, input_chw_);
 
-    // 3) Otsu + 피부색 결합 마스크 생성
-    if (!run_mask(input_chw_.data(), in_w_, in_h_, mask_f_)) {
-        // 실패: RGB24 -> YUV420P 복사
-        if (!ensure_sws_rgb_to_yuv(src->width, src->height)) return AVERROR(EIO);
-        const uint8_t* in_data[4] = { rgb_buf_.data(), nullptr, nullptr, nullptr };
-        int            in_ls [4]  = { src->width * 3, 0, 0, 0 };
-        uint8_t*       out_data[4]= { dst->data[0], dst->data[1], dst->data[2], nullptr };
-        int            out_ls [4] = { dst->linesize[0], dst->linesize[1], dst->linesize[2], 0 };
-        sws_scale(sws_rgb_to_yuv_, in_data, in_ls, 0, src->height, out_data, out_ls);
-        return 0;
+    // 3) ONNX 추론 or 휴리스틱 폴백
+    bool has_mask = false;
+    if (ort_ready_) {
+        BOOST_LOG(debug) << "run mask onnx!!!!!!!!!!!!!!!";
+        has_mask = run_mask_onnx(input_chw_.data(), in_w_, in_h_, mask_f_);
+    }
+    if (!has_mask) {
+        BOOST_LOG(debug) << "run mask heuristic!!!!!!!!!!!!!!!";
+        has_mask = run_mask_heuristic(input_chw_.data(), in_w_, in_h_, mask_f_);
     }
 
     // 4) 기본 배경: 원본을 YUV420P로 깔기
@@ -402,8 +417,10 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
         sws_scale(sws_rgb_to_yuv_, in_data, in_ls, 0, src->height, out_data, out_ls);
     }
 
-    // 5) 마스크가 1(전경=사람 추정)인 곳을 "반투명 초록"으로 블렌딩
-    blend_green_with_mask(dst, mask_f_, in_w_, in_h_, mask_thr_, overlay_alpha_);
+    // 5) 마스크가 있으면 초록 오버레이
+    if (has_mask) {
+        blend_green_with_mask(dst, mask_f_, in_w_, in_h_, mask_thr_, overlay_alpha_);
+    }
 
     return 0;
 }
