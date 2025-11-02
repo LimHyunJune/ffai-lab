@@ -307,43 +307,43 @@ bool PersonSegProcessor::run_mask(const float* chw, int inW, int inH, std::vecto
 // Public APIs
 // ======================
 
-bool PersonSegProcessor::init(const char* /*model_path*/,
-                              int in_w, int in_h,
-                              float thr,
-                              int /*threads*/,
-                              int src_w, int src_h,
-                              AVPixelFormat src_fmt)
+bool PersonSegProcessor::init(const char* model_path,
+    int in_w, int in_h,
+    float thr,
+    int threads,
+    int src_w, int src_h,
+    AVPixelFormat src_fmt)
 {
     in_w_   = in_w;
     in_h_   = in_h;
-    mask_thr_= thr;                    // Controller에서 0.3~0.6 정도로 조정
+    mask_thr_= thr;
     src_w_  = src_w;
     src_h_  = src_h;
     src_fmt_= src_fmt;
+    ort_threads_ = std::max(1, threads);
 
-    // sws 컨텍스트는 실제 처리 시점에 생성/갱신
     rgb_buf_.clear();
     input_chw_.clear();
     mask_f_.clear();
 
+    // ---- ONNX Runtime 세션 생성 (있으면 사용, 없거나 실패하면 폴백 준비) ----
+    ort_ready_ = false;
+    if (model_path && *model_path) {
+    ort_ = personseg_create(model_path, in_w_, in_h_, ort_threads_);
+    if (ort_) ort_ready_ = true;
+    }
     return true;
 }
 
 void PersonSegProcessor::close() {
-    if (sws_in_to_rgb_) {
-        sws_freeContext(sws_in_to_rgb_);
-        sws_in_to_rgb_ = nullptr;
-    }
-    if (sws_rgb_to_yuv_) {
-        sws_freeContext(sws_rgb_to_yuv_);
-        sws_rgb_to_yuv_ = nullptr;
-    }
+    if (sws_in_to_rgb_)  { sws_freeContext(sws_in_to_rgb_);  sws_in_to_rgb_  = nullptr; }
+    if (sws_rgb_to_yuv_) { sws_freeContext(sws_rgb_to_yuv_); sws_rgb_to_yuv_ = nullptr; }
+    if (ort_) { personseg_destroy(&ort_); ort_ready_ = false; }
 }
 
 int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
     if (!src || !dst) return AVERROR(EINVAL);
 
-    // dst는 호출부에서 YUV420P로 할당되어 온다고 가정(안전장치)
     if (dst->format != AV_PIX_FMT_YUV420P ||
         dst->width  != src->width ||
         dst->height != src->height)
@@ -351,9 +351,9 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
         return AVERROR(EINVAL);
     }
 
-    // 1) src -> RGB24 (동일 해상도)
+    // 1) src -> RGB24
     if (!ensure_sws_in_to_rgb((AVPixelFormat)src->format, src->width, src->height)) {
-        // 실패 시: src를 바로 YUV420P로 변환만 수행하고 종료
+        // 실패: 최소한 YUV420P로 패스스루
         if (!ensure_sws_rgb_to_yuv(src->width, src->height)) return AVERROR(EIO);
         const uint8_t* in_data[4] = { src->data[0], src->data[1], src->data[2], nullptr };
         int            in_ls [4]  = { src->linesize[0], src->linesize[1], src->linesize[2], 0 };
@@ -368,7 +368,7 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
         return 0;
     }
 
-    // src -> RGB24
+    // src -> RGB24 버퍼로
     {
         const uint8_t* in_data[4] = { src->data[0], src->data[1], src->data[2], nullptr };
         int            in_ls [4]  = { src->linesize[0], src->linesize[1], src->linesize[2], 0 };
@@ -377,22 +377,19 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
         sws_scale(sws_in_to_rgb_, in_data, in_ls, 0, src->height, out_data, out_ls);
     }
 
-    // 2) RGB24 -> CHW float (내부 마스크 해상도)
+    // 2) RGB -> CHW float(in_w_ x in_h_), [0..1]
     rgb_to_chw_resized(rgb_buf_.data(), src->width, src->height, in_w_, in_h_, input_chw_);
 
-    // 3) Otsu + 피부색 결합 마스크 생성
-    if (!run_mask(input_chw_.data(), in_w_, in_h_, mask_f_)) {
-        // 실패: RGB24 -> YUV420P 복사
-        if (!ensure_sws_rgb_to_yuv(src->width, src->height)) return AVERROR(EIO);
-        const uint8_t* in_data[4] = { rgb_buf_.data(), nullptr, nullptr, nullptr };
-        int            in_ls [4]  = { src->width * 3, 0, 0, 0 };
-        uint8_t*       out_data[4]= { dst->data[0], dst->data[1], dst->data[2], nullptr };
-        int            out_ls [4] = { dst->linesize[0], dst->linesize[1], dst->linesize[2], 0 };
-        sws_scale(sws_rgb_to_yuv_, in_data, in_ls, 0, src->height, out_data, out_ls);
-        return 0;
+    // 3) ONNX 추론 or 폴백 마스크
+    bool has_mask = false;
+    if (ort_ready_) {
+        has_mask = run_mask_onnx(input_chw_.data(), in_w_, in_h_, mask_f_);
+    }
+    if (!has_mask) {
+        has_mask = run_mask_heuristic(input_chw_.data(), in_w_, in_h_, mask_f_);
     }
 
-    // 4) 기본 배경: 원본을 YUV420P로 깔기
+    // 4) 원본을 YUV420P로 깔기
     {
         if (!ensure_sws_rgb_to_yuv(src->width, src->height)) return AVERROR(EIO);
         const uint8_t* in_data[4] = { rgb_buf_.data(), nullptr, nullptr, nullptr };
@@ -402,8 +399,35 @@ int PersonSegProcessor::process(AVFrame* src, AVFrame* dst) {
         sws_scale(sws_rgb_to_yuv_, in_data, in_ls, 0, src->height, out_data, out_ls);
     }
 
-    // 5) 마스크가 1(전경=사람 추정)인 곳을 "반투명 초록"으로 블렌딩
-    blend_green_with_mask(dst, mask_f_, in_w_, in_h_, mask_thr_, overlay_alpha_);
-
+    // 5) 마스크가 있으면 초록 오버레이
+    if (has_mask) {
+        blend_green_with_mask(dst, mask_f_, in_w_, in_h_, mask_thr_, overlay_alpha_);
+    }
     return 0;
 }
+
+bool PersonSegProcessor::run_mask_onnx(const float* chw, int inW, int inH, std::vector<float>& outMask) {
+    if (!ort_ || !chw || inW<=0 || inH<=0) return false;
+
+    outMask.resize((size_t)inW * inH);
+
+    // personseg_run: 출력은 마지막 2차원이 H×W인 float 텐서라고 가정
+    // (모델이 logits면 호출 후에 시그모이드/스레시홀드 적용 필요)
+    int got = personseg_run(ort_, chw, /*n=*/1, /*c=*/3, /*hh=*/inH, /*ww=*/inW, outMask.data());
+    if (got != (int)((size_t)inW * inH)) {
+        // 출력 shape이 기대와 달라 실패로 간주(폴백으로 전환)
+        return false;
+    }
+
+    // 필요시 시그모이드(모델이 확률이 아니라 logits를 내보내는 경우)
+    // 여기서는 간단히 [0..1] 범위로 클램프만. 실제 모델 스펙에 맞춰 조정 권장.
+    for (float& v : outMask) {
+        // 예시: 확률로 가정하고 사용. (logits이면 아래 주석 해제)
+        // v = 1.f / (1.f + std::exp(-v));
+        if (v < 0.f) v = 0.f;
+        if (v > 1.f) v = 1.f;
+    }
+    return true;
+}
+
+
